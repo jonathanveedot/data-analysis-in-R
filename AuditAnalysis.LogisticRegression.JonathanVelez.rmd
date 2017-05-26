@@ -1,0 +1,888 @@
+---
+title: "Logistic Regression: Audit Analysis"
+author: "Jonathan Velez"
+date: "January 24, 2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width = 4)
+knitr::opts_chunk$set(fig.height = 3)
+knitr::opts_chunk$set(fig.align = "center")
+knitr::opts_chunk$set(tidy = FALSE)
+knitr::opts_chunk$set(warning=FALSE)
+knitr::opts_chunk$set(message=FALSE)
+```
+
+# Introduction
+
+The "audit.csv" dataset is an artificially constructed data set that contains the characteristics of n = 2000 individual tax returns. This analysis explores the data by preparing useful graphs and tables, generating predictive models, and evaluating the resulting models. Here the objective is to predict the binary (TARGET_Adjusted) and continuous (RISK_Adjustment) target variables.  
+
+The data set includes the following variables:  
+* ID: Unique identifier for each person.  
+* Age: Age of person.  
+* Employment: Type of employment.  
+* Education: Highest level of education.  
+* Marital: Current marital status.  
+* Occupation: Type of occupation.  
+* Income: Amount of income declared.  
+* Gender: Gender of person.  
+* Deductions: Total amount of expenses that a person claims in their financial statement.  
+* Hours: Average hours worked on a weekly basis.  
+* TARGET_Adjusted: The binary target variable for classification modeling, indicating nonproductive and productive audits (0 and 1, respectively). Productive audits are those that result in an adjustment being made to a client's financial statement.  
+* RISK_Adjustment: The continuous target variable; this variable records the monetary amount of any adjustment to the person's financial claims as a result of a productive audit. This variable is a measure of the size of the risk associated with the person.  
+
+\newpage
+# Data Exploration
+
+## Preparation
+
+```{r, message=FALSE}
+
+# Load required packages
+library("ggplot2")   ## data visualization
+library("e1071")     ## skewness
+library("knitr")     ## summary table
+library("car")       ## scatter plot matrix
+library("reshape2")  ## percentage table
+library("plyr")      ## percentage table
+library("ROCR")
+library("leaps")
+
+# Load data
+data.file = "http://www.yurulin.com/class/spring2017_datamining/data/audit.csv"
+df = read.csv(data.file, header = TRUE, sep = ',')
+df = df[,-1] # remove the ID column
+df$TARGET_Adjusted = factor(df$TARGET_Adjusted, levels=c("0", "1"))
+
+# Identify any missing values and handle missing data appropriately
+summary(df)
+
+# There are 100 NA's in Employment and 101 NA's in Occupation, 
+# but the interpretation of these missing values are unknown.
+# Additionally, there are very few instances of Unemployed and 
+# Volunteer for Employment, and very few instances of Home and 
+# Military for Occupation. These records are removed.
+summary(df$Employment)
+summary(df$Occupation)
+df = na.omit(df) ## remove incomplete rows with NA's
+df = df[-which(df$Employment == "Volunteer"),]
+df$Employment = droplevels(df$Employment) ## drop unused levels
+df = df[-which(df$Occupation == "Home"),]
+df = df[-which(df$Occupation == "Military"),]
+df$Occupation = droplevels(df$Occupation) ## drop unused levels
+
+# Recode Education categories
+df$Education = as.character(df$Education)
+df$Education[df$Education=="Doctorate"] = "PostGraduate"
+df$Education[df$Education=="Professional"] = "PostGraduate"
+df$Education[df$Education=="Master"] = "PostGraduate"
+df$Education[df$Education=="Associate"] = "SomeCol/2Yr"
+df$Education[df$Education=="College"] = "SomeCol/2Yr"
+df$Education[df$Education=="Vocational"] = "SomeCol/2Yr"
+df$Education[df$Education=="Yr12"] = "LessThanHS"
+df$Education[df$Education=="Yr11"] = "LessThanHS"
+df$Education[df$Education=="Yr10"] = "LessThanHS"
+df$Education[df$Education=="Yr9"] = "LessThanHS"
+df$Education[df$Education=="Yr7t8"] = "LessThanHS"
+df$Education[df$Education=="Yr5t6"] = "LessThanHS"
+df$Education[df$Education=="Yr1t4"] = "LessThanHS"
+df$Education[df$Education=="Preschool"] = "LessThanHS"
+df$Education = as.factor(df$Education)
+df$Education = factor(
+  df$Education, 
+  levels = c("LessThanHS", "HSgrad", "SomeCol/2Yr", "Bachelor", "PostGraduate")
+  )
+
+dim(df) ## 1892 records and 11 features used in analysis
+
+```
+\newpage
+## Response Variables
+
+The dataset contains 1892 instances and 11 features after the initial preparation. 447 out of these 1892 instances were targeted for adjustment, resulting in a baseline probability of 23.62% for being targeted for adjustment. The density distribution of RISK_Adjustment where the target instance was adjusted reveals a multimodal distribution with positive non-zero skewness. The skewness of the distribution is greater than +5, indicating that the distribution is extremely skewed in the positive direction.  
+
+```{r}
+
+# Data summary of TARGET_Adjusted
+summary(df$TARGET_Adjusted)
+## Baseline probability of being targeted for adjustment
+length(df$TARGET_Adjusted[df$TARGET_Adjusted=="1"])/length(df$TARGET_Adjusted)
+
+c(summary(df$RISK_Adjustment[df$TARGET_Adjusted=="1"]), 
+                    SD=round(sd(df$RISK_Adjustment[df$TARGET_Adjusted=="1"]), 2))
+
+# Explore the density distribution of RISK_Adjustment where 
+# the target intance resulted in an adjustment
+no.y = theme(axis.title.y=element_blank(), ## remove clutter on y axis
+axis.text.y=element_blank(),
+axis.ticks.y=element_blank())
+ggplot(df[df$TARGET_Adjusted=="1",], aes(x=RISK_Adjustment)) + geom_density() + no.y
+shapiro.test(df$RISK_Adjustment[df$TARGET_Adjusted=="1"])
+skewness(df$RISK_Adjustment[df$TARGET_Adjusted=="1"])
+
+```
+\newpage
+## Quantitative Predictor Variables
+
+A table describing the central tendency and spread of each quantitative predictor variable is included below. Each quantitative predictor is explored with respect to TARGET_Adjusted and evaluated for any correlation with RISK_Adjustment.  
+
+The density distribution of Age reveals a bimodal distribution that is moderately skewed in the positive direction. The distribution of Age of adjusted instances is centered at around 44, whereas the distribution of Age of instances not adjusted is centered at around 36. The ANOVA table for Age by TARGET_Adjusted demonstrates an F-statistic of 120.9 with a p-value less than 2e-16, and clearly indicates a rejection of the null hypothesis of equal means for instances that were adjusted and not adjusted.
+
+The density distribution of Income reveals a unimodal distribution that is highly skewed in the positive direction. The distribution of Income of adjusted instances is centered at around \$60000, whereas the distribution of Income of instances not adjusted is centered at around \$92000. The ANOVA table for Income by TARGET_Adjusted demonstrates an F-statistic of 76.01 with a p-value less than 2e-16, and clearly indicates a rejection of the null hypothesis of equal means for instances that were adjusted and not adjusted.  
+
+The density distribution of Deductions reveals an extremely skewed, multimodal distribution where most instances are zero. The distribution of Deductions of adjusted instances is centered at around \$33, whereas the distribution of Deductions of instances not adjusted is centered at around \$184. The ANOVA table for Deductions by TARGET_Adjusted demonstrates an F-statistic of 68.7 with a p-value less than 2e-16, and clearly indicates a rejection of the null hypothesis of equal means for instances that were adjusted and not adjusted. 
+
+The large amount of zero instances of Deductions suggests the need for exploration of the distribution of non-zero instances. Plotting the density distribution of non-zero Deductions instances reveals a bimodal distribution that is approximately normal. The distribution of non-zero Deductions of adjusted instances is centered at around \$1205, whereas the distribution of non-zero Deductions of instances not adjusted is centered at around \$2004. The ANOVA table for Deductions by TARGET_Adjusted demonstrates an F-statistic of 156.2 with a p-value less than 2e-16, and clearly indicates a rejection of the null hypothesis of equal means for instances that were adjusted and not adjusted. The results observed from exploring the distributions of all instances of Deductions and non-zero instances of Deductions suggests a possible need for including an additional qualitative predictor indicating whether or not the instance has a claimed deduction.  
+
+The density distribution of Hours reveals a multimodal distribution that is somewhat skewed in the positive direction. The distribution of Hours of adjusted instances is centered at around 39, whereas the distribution of Hours of instances not adjusted is centered at around 45. The ANOVA table for Hours by TARGET_Adjusted demonstrates an F-statistic of 89.02 with a p-value less than 2e-16, and clearly indicates a rejection of the null hypothesis of equal means for instances that were adjusted and not adjusted.  
+
+Exploring the correlations between quantitative variables for instances that resulted in adjustment indicates no correlation between any of the variables and RISK_Adjustment. There are, however, slight negative correlations between Income and Age, Hours and Age, and Hours and Income. The scatter plot matrix of these variables does not indicate any clear trends between variables.  
+
+```{r}
+
+Age = c(summary(df$Age), round(sd(df$Age), 2))
+Income = c(summary(df$Income), round(sd(df$Income), 2))
+Deductions = c(summary(df$Deductions), round(sd(df$Deductions), 2))
+Hours = c(summary(df$Hours), round(sd(df$Hours), 2))
+result = rbind(Age, Income, Deductions, Hours)
+result = as.data.frame(result)
+colnames(result)[7] = c("SD")
+kable(result, caption = paste("Table 1:",
+                              "Summary of numeric predictor variables",
+                              "(Note: RISK_Adjustment description is based on",
+                              "only the instances where the target was adjusted"))
+rm(list=c("Age", "Income", "Deductions", "Hours", "result"))
+
+```
+\newpage
+```{r}
+
+# Explore the density distribution of Age
+ggplot(df, aes(x=Age)) +
+  geom_histogram(aes(y = ..density..), binwidth=1) + 
+  geom_density() + no.y
+shapiro.test(df$Age)
+skewness(df$Age)
+
+```
+\newpage
+```{r}
+
+# Conditional density plot of Age by TARGET_Adjusted
+ggplot(df, aes(x=Age, fill=TARGET_Adjusted)) +
+  geom_density(alpha = 0.8) +
+  guides(fill=guide_legend(title="Target Adjusted\n(0: false, 1: true)")) +
+  scale_fill_brewer(palette="Set1") + no.y
+
+# Analysis of differences in Age by TARGET_Adjusted
+aggregate(Age~TARGET_Adjusted, data=df, mean)
+aggregate(Age~TARGET_Adjusted, data=df, median)
+summary(aov(Age~TARGET_Adjusted, data=df))
+
+```
+\newpage
+```{r}
+
+# Explore the density distribution of Income
+ggplot(df, aes(x=Income)) +
+  geom_histogram(aes(y = ..density..), binwidth=5000) + 
+  geom_density() + no.y + 
+  scale_x_continuous(labels=c("0", "100K", "200K", "300K", "400K", "500K"))
+shapiro.test(df$Income)
+skewness(df$Income)
+
+```
+\newpage
+```{r}
+
+# Conditional density plot of Income by TARGET_Adjusted
+ggplot(df, aes(x=Income, fill=TARGET_Adjusted)) +
+  geom_density(alpha = 0.8) +
+  guides(fill=guide_legend(title="Target Adjusted\n(0: false, 1: true)")) +
+  scale_fill_brewer(palette="Set1") + no.y + 
+  scale_x_continuous(labels=c("0", "100K", "200K", "300K", "400K", "500K"))
+
+# Analysis of differences in Income by TARGET_Adjusted
+aggregate(Income~TARGET_Adjusted, data=df, mean)
+aggregate(Income~TARGET_Adjusted, data=df, median)
+summary(aov(Income~TARGET_Adjusted, data=df))
+
+```
+\newpage
+```{r}
+
+# Explore the density distribution of Deductions
+ggplot(df, aes(x=Deductions)) +
+  geom_histogram(aes(y = ..density..), binwidth=100) + 
+  geom_density() + no.y
+shapiro.test(df$Deductions)
+skewness(df$Deductions)
+
+## Density distribution where Deduction is not 0
+ggplot(df[df$Deductions!=0,], aes(x=Deductions)) +
+  geom_histogram(aes(y = ..density..), binwidth=100) + 
+  geom_density() + no.y
+shapiro.test(df$Deductions[df$Deductions!=0])
+skewness(df$Deductions[df$Deductions!=0])
+
+```
+\newpage
+```{r}
+
+# Conditional density plot of Deductions by TARGET_Adjusted
+ggplot(df, aes(x=Deductions, fill=TARGET_Adjusted)) +
+  geom_density(alpha = 0.8) +
+  guides(fill=guide_legend(title="Target Adjusted\n(0: false, 1: true)")) +
+  scale_fill_brewer(palette="Set1") + no.y 
+
+# Conditional density plot of non-zero Deductions by TARGET_Adjusted
+ggplot(df[df$Deductions!=0,], aes(x=Deductions, fill=TARGET_Adjusted)) +
+  geom_density(alpha = 0.8) +
+  guides(fill=guide_legend(title="Target Adjusted\n(0: false, 1: true)")) +
+  scale_fill_brewer(palette="Set1") + no.y 
+
+```
+\newpage
+```{r}
+
+# Analysis of differences in Deductions by TARGET_Adjusted
+aggregate(Deductions~TARGET_Adjusted, data=df, mean)
+aggregate(Deductions~TARGET_Adjusted, data=df, median)
+summary(aov(Deductions~TARGET_Adjusted, data=df))
+
+# Analysis of differences in non-zero Deductions by TARGET_Adjusted
+aggregate(Deductions~TARGET_Adjusted, data=df[df$Deductions!=0,], mean)
+aggregate(Deductions~TARGET_Adjusted, data=df[df$Deductions!=0,], median)
+summary(aov(Deductions~TARGET_Adjusted, data=df[df$Deductions!=0,]))
+
+# Create variable for whether deduction claimed
+df$ClaimedDeduction = ifelse(df$Deductions==0, "NoDeduction", "Deduction")
+df$ClaimedDeduction = factor(df$ClaimedDeduction, levels=c("NoDeduction", "Deduction"))
+
+```
+\newpage
+```{r}
+
+# Explore the density distribution of Hours
+ggplot(df, aes(x=Hours)) +
+  geom_histogram(aes(y = ..density..), binwidth=5) + 
+  geom_density() + no.y
+shapiro.test(df$Hours)
+skewness(df$Hours)
+
+```
+\newpage
+```{r}
+
+# Conditional density plot of Income by TARGET_Adjusted
+ggplot(df, aes(x=Hours, fill=TARGET_Adjusted)) +
+  geom_density(alpha = 0.8) +
+  guides(fill=guide_legend(title="Target Adjusted\n(0: false, 1: true)")) +
+  scale_fill_brewer(palette="Set1") + no.y
+
+# Analysis of differences in Income by TARGET_Adjusted
+aggregate(Hours~TARGET_Adjusted, data=df, mean)
+aggregate(Hours~TARGET_Adjusted, data=df, median)
+summary(aov(Hours~TARGET_Adjusted, data=df))
+
+```
+\newpage
+```{r, fig.width=7.5, fig.height=6}
+
+# Correlations for cases where instance was adjusted
+df.numeric = df[df$TARGET_Adjusted=="1", sapply(df, is.numeric)]
+cor(df.numeric)
+suppressWarnings(
+  scatterplotMatrix(df.numeric, spread=F, lty.smooth=2, main="Scatter Plot Matrix")
+)
+rm(df.numeric)
+
+```
+\newpage
+## Qualitative Predictor Variables
+
+Several tables describing the counts and percentages of each qualitative predictor variable are included below. The percentage of each qualitative predictor is explored with respect to TARGET_Adjusted. The distribution of RISK_Adjustment is conditioned on each variable, and the means of the various categories are tested for significant differences.
+
+The bar graph of TARGET_Adjusted faceted on Gender clearly indicates that a large proportion of males are adjusted, and relatively few females are adjusted. The distribution of RISK_Adjustment for adjusted instances is centered at around \$10900 for females and at around \$8200 for males (both with medians of approximately \$5900). The ANOVA table for RISK_Adjustment by Gender demonstrates an F-statistic of 1.77 with a p-value of 0.184, and indicates a failure to reject the null hypothesis of equal means for adjusted instances of males and females.  
+
+The summary table describing the proportion of each Marital category that was targeted for adjustment suggests that it may be beneficial to simply recode Marital as a boolean variable describing whether the instance is married with the spouse present. 44.13% of married instances were targeted for adjustment, compared to only about 7.68% on average for all other cases. The bar graph of TARGET_Adjusted faceted on Marital clearly indicates that a large proportion of married instances are adjusted, and relatively few are adjusted in all other cases. The distribution of RISK_Adjustment for adjusted instances is centered at around \$8670 for married instances and at around \$8190 for all other cases (both with medians of about \$5800). The ANOVA table for RISK_Adjustment by Marital demonstrates an F-statistic of 0.051 with a p-value of 0.822, and clearly indicates a failure to reject the null hypothesis of equal means for adjusted instances of married cases and all other cases. 
+
+The bar graph of TARGET_Adjusted faceted on Education clearly indicates that the proportion of instances that are adjusted increases with the level of education. The distributions of RISK_Adjustment for adjusted instances for the various Education categories are centered between approximately \$7770 and \$13275. The ANOVA table for RISK_Adjustment by Education demonstrates an F-statistic of 1.025 with a p-value of 0.394, and clearly indicates a failure to reject the null hypothesis of equal means for adjusted instances of the various Education categories.  
+
+The bar graph of TARGET_Adjusted faceted on Employment clearly indicates that a larger proportion of self-employed instances are adjusted compared to all other categories. Additionally, more instances are employed in the private sector than all other categories combined. The distributions of RISK_Adjustment for adjusted instances for the various Employment categories are centered between approximately \$7060 and \$16550. The ANOVA table for RISK_Adjustment by Employment demonstrates an F-statistic of 3.452 with a p-value of 0.00452, and indicates a potential rejection of the null hypothesis of equal means for adjusted instances of the various Employment categories (at the p<0.01 significance level). Pairwise t-testing indicates that it may be likely that there is a difference in means between instances of private sector employment and local public sector employment.  
+
+The bar graph of TARGET_Adjusted faceted on Occupation indicates that a very large proportion of executive, professional, and protective instances are adjusted, whereas low proportions of any other occupation are adjusted. The distributions of RISK_Adjustment for adjusted instances for the various Occupation categories are centered between approximately \$2025 and \$7250. The ANOVA table for RISK_Adjustment by Occupation demonstrates an F-statistic of 0.712 with a p-value of 0.727, and clearly indicates a failure to reject the null hypothesis of equal means for adjusted instances of the various Occupation categories. 
+
+The bar graph of TARGET_Adjusted faceted on ClaimedDeduction indicates that half of the deduction instances are adjusted, whereas a relatively low proportion of no deduction instances are adjusted. The distribution of RISK_Adjustment for adjusted instances is centered at around \$7840 for instances with deductions and at around \$8680 for instances with no deductions. The ANOVA table for RISK_Adjustment by Gender demonstrates an F-statistic of 0.114 with a p-value of 0.73, and clearly indicates a failure to reject the null hypothesis of equal means for adjusted instances of deductions and no deductions. 
+
+```{r}
+
+# Gender summary table
+tbl = melt(table(df[,c(11,7)]))
+tbl = cbind(tbl, 
+            Percentage=ddply(tbl, .(Gender), summarize, 
+                             percentage=round(value/sum(value)*100,2))$percentage)
+tbl = data.frame(tbl)
+colnames(tbl)[3] = c("Count")
+kable(tbl[,c(2,1,3,4)], caption="Table 2: Counts and Percentages of adjustments for Gender")
+
+# Marital summary table
+tbl = melt(table(df[,c(11,4)]))
+tbl = cbind(tbl, 
+            Percentage=ddply(tbl, .(Marital), summarize, 
+                             percentage=round(value/sum(value)*100,2))$percentage)
+tbl = data.frame(tbl)
+colnames(tbl)[3] = c("Count")
+kable(tbl[,c(2,1,3,4)], caption="Table 3: Counts and Percentages of adjustments for Marital")
+
+# Education summary table
+tbl = melt(table(df[,c(11,3)]))
+tbl = cbind(tbl, 
+            Percentage=ddply(tbl, .(Education), summarize, 
+                             percentage=round(value/sum(value)*100,2))$percentage)
+tbl = data.frame(tbl)
+colnames(tbl)[3] = c("Count")
+kable(tbl[,c(2,1,3,4)], caption="Table 4: Counts and Percentages of adjustments for Education")
+
+# Employment summary table
+tbl = melt(table(df[,c(11,2)]))
+tbl = cbind(tbl, 
+            Percentage=ddply(tbl, .(Employment), summarize, 
+                             percentage=round(value/sum(value)*100,2))$percentage)
+tbl = data.frame(tbl)
+colnames(tbl)[3] = c("Count")
+kable(tbl[,c(2,1,3,4)], caption="Table 5: Counts and Percentages of adjustments for Employment")
+
+# Occupation summary table
+tbl = melt(table(df[,c(11,5)]))
+tbl = cbind(tbl, 
+            Percentage=ddply(tbl, .(Occupation), summarize, 
+                             percentage=round(value/sum(value)*100,2))$percentage)
+tbl = data.frame(tbl)
+colnames(tbl)[3] = c("Count")
+kable(tbl[,c(2,1,3,4)], caption="Table 6: Counts and Percentages of adjustments for Occupation")
+
+# ClaimedDeduction summary table
+tbl = melt(table(df[,c(11,12)]))
+tbl = cbind(tbl, 
+            Percentage=ddply(tbl, .(ClaimedDeduction), summarize, 
+                             percentage=round(value/sum(value)*100,2))$percentage)
+tbl = data.frame(tbl)
+colnames(tbl)[3] = c("Count")
+kable(tbl[,c(2,1,3,4)], caption="Table 7: Counts and Percentages of adjustments for ClaimedDeduction")
+
+rm(tbl)
+
+```
+\newpage
+```{r}
+
+# TARGET_Adjusted counts faceted on Gender
+ggplot(data=df, aes(x=TARGET_Adjusted)) + geom_bar() + 
+  facet_wrap(~Gender, nrow=1)
+
+# Conditional density plot of RISK_Adjustment by Gender
+ggplot(df[df$TARGET_Adjusted=="1",], aes(x=RISK_Adjustment, fill=Gender)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_brewer(palette="Set1") + no.y
+
+```
+\newpage
+```{r}
+
+# Analysis of differences in RISK_Adjustment by Gender
+aggregate(RISK_Adjustment~Gender, data=df[df$TARGET_Adjusted=="1",], mean)
+aggregate(RISK_Adjustment~Gender, data=df[df$TARGET_Adjusted=="1",], median)
+summary(aov(RISK_Adjustment~Gender, data=df[df$TARGET_Adjusted=="1",]))
+
+```
+\newpage
+```{r}
+
+# Recode marital indicating whether married with a spouse present
+df$Marital = as.character(df$Marital)
+df$Marital <- ifelse(
+  df$Marital=="Married", 
+  c("Married"), 
+  c("Abs/Div/Wid/Unmar")) 
+df$Marital = as.factor(df$Marital)
+df$Marital = factor(df$Marital, 
+  levels = c("Abs/Div/Wid/Unmar", "Married")
+  )
+
+# TARGET_Adjusted counts faceted on Marital
+ggplot(data=df, aes(x=TARGET_Adjusted)) + geom_bar() + 
+  facet_wrap(~Marital, nrow=1)
+
+```
+\newpage
+```{r}
+
+# Conditional density plot of RISK_Adjustment by Marital
+ggplot(df[df$TARGET_Adjusted=="1",], aes(x=RISK_Adjustment, fill=Marital)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_brewer(palette="Set1") + no.y
+
+# Analysis of differences in RISK_Adjustment by Gender
+aggregate(RISK_Adjustment~Marital, data=df[df$TARGET_Adjusted=="1",], mean)
+aggregate(RISK_Adjustment~Marital, data=df[df$TARGET_Adjusted=="1",], median)
+summary(aov(RISK_Adjustment~Marital, data=df[df$TARGET_Adjusted=="1",]))
+
+```
+\newpage
+```{r}
+
+# TARGET_Adjusted counts faceted on Education
+ggplot(data=df, aes(x=TARGET_Adjusted)) + geom_bar() + 
+  facet_wrap(~Education, nrow=1)
+
+# Conditional density plot of RISK_Adjustment by Education
+ggplot(df[df$TARGET_Adjusted=="1",], aes(x=RISK_Adjustment, fill=Education)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_brewer(palette="Set1") + no.y
+
+```
+\newpage
+```{r}
+
+# Analysis of differences in RISK_Adjustment by Education
+aggregate(RISK_Adjustment~Education, data=df[df$TARGET_Adjusted=="1",], mean)
+aggregate(RISK_Adjustment~Education, data=df[df$TARGET_Adjusted=="1",], median)
+summary(aov(RISK_Adjustment~Education, data=df[df$TARGET_Adjusted=="1",]))
+
+```
+\newpage
+```{r}
+
+# TARGET_Adjusted counts faceted on Employment
+ggplot(data=df, aes(x=TARGET_Adjusted)) + geom_bar() + 
+  facet_wrap(~Employment, nrow=1)
+
+# Conditional density plot of RISK_Adjustment by Employment
+ggplot(df[df$TARGET_Adjusted=="1",], aes(x=RISK_Adjustment, fill=Employment)) +
+  geom_density(alpha = 0.6) +
+  scale_fill_brewer(palette="Set1") + no.y
+
+```
+\newpage
+```{r}
+
+# Analysis of differences in RISK_Adjustment by Employment
+aggregate(RISK_Adjustment~Employment, data=df[df$TARGET_Adjusted=="1",], mean)
+aggregate(RISK_Adjustment~Employment, data=df[df$TARGET_Adjusted=="1",], median)
+summary(aov(RISK_Adjustment~Employment, data=df[df$TARGET_Adjusted=="1",]))
+pairwise.t.test(df$RISK_Adjustment[df$TARGET_Adjusted=="1"], 
+                df$Employment[df$TARGET_Adjusted=="1"])
+
+```
+\newpage
+```{r}
+
+# TARGET_Adjusted counts faceted on Occupation
+ggplot(data=df, aes(x=TARGET_Adjusted)) + geom_bar() + 
+  facet_wrap(~Occupation, nrow=2)
+
+# Conditional density plot of RISK_Adjustment by Occupation
+ggplot(df[df$TARGET_Adjusted=="1",], aes(x=RISK_Adjustment, fill=Occupation)) +
+  geom_density(alpha = 0.6) + no.y
+
+```
+\newpage
+```{r}
+
+# Analysis of differences in RISK_Adjustment by Occupation
+aggregate(RISK_Adjustment~Occupation, data=df[df$TARGET_Adjusted=="1",], mean)
+aggregate(RISK_Adjustment~Occupation, data=df[df$TARGET_Adjusted=="1",], median)
+summary(aov(RISK_Adjustment~Occupation, data=df[df$TARGET_Adjusted=="1",]))
+
+```
+\newpage
+```{r}
+
+# TARGET_Adjusted counts faceted on Occupation
+ggplot(data=df, aes(x=TARGET_Adjusted)) + geom_bar() + 
+  facet_wrap(~ClaimedDeduction, nrow=1)
+
+# Conditional density plot of RISK_Adjustment by Occupation
+ggplot(df[df$TARGET_Adjusted=="1",], aes(x=RISK_Adjustment, fill=ClaimedDeduction)) +
+  geom_density(alpha = 0.6) + 
+  scale_fill_brewer(palette="Set1") + no.y
+
+```
+\newpage
+```{r}
+
+# Analysis of differences in RISK_Adjustment by Occupation
+aggregate(RISK_Adjustment~ClaimedDeduction, data=df[df$TARGET_Adjusted=="1",], mean)
+aggregate(RISK_Adjustment~ClaimedDeduction, data=df[df$TARGET_Adjusted=="1",], median)
+summary(aov(RISK_Adjustment~ClaimedDeduction, data=df[df$TARGET_Adjusted=="1",]))
+
+```
+\newpage
+# Logistic Regression Analysis of TARGET_Adjusted
+
+Five different models are evaluated using various subsets of predictors. The model generated using all predictors (model A) produces the best performance in terms of F-score and AUC (0.603 and 0.885), but the model generated using only Age, Gender, Marital, Education, Occupation, and ClaimedDeduction (model C) produces comparable results (0.602 and 0.872) while offering a simpler model. Model C is retained as the best model for exploration of odds, and the lift curve and ROC curve are plotted for this model. Given the model summary, one can see that qualitative predictor variables with multiple levels are expanded into a set of binary variables. Among all predictors, Age, MaritalMarried, EducationSomeCol/2Yr, EducationBachelor, EducationPostGraduate, OccupationExecutive, and ClaimedDeductionDeduction are the most significant predictors.  
+
+The relationship between odds ratio and predictors can be discussed based on the estimated coefficients (which represent the log odds). The Intercept is the log odds in situation where all the properties are absent (i.e., Age = 0, GenderMale = 0, ..., and ClaimedDeductionDeduction = 0). Its odds ratio is $e^{\beta_Intercept}$. Binary variables only have two values {0, 1}, so keeping other conditions constant, the change from 0 to 1 implies a multiplicative change in odds of success. For example, there are two persons who share the same attributes except that one is married (MaritalMarried = 1 with odds of success $r$) and the other one is unmarried (MaritalMarried = 0 with odds of success $r'$). We can claim that its odds ratio, on average, is $r/r' = e^{\beta_MaritalMarried}$. Quantitative predictor variables, such as Age, one unit increase would cause a change in the odds of success by $e^{\beta_Age}$. Therefore, its odds ratio is $e^{\beta_Age}$. The log odds and odds ratio for each predictor variable is included in the table below. The table indicates that post-graduate education and being married with a spouse present results in the largest change of the odds of success. 
+
+```{r}
+
+# 10-fold cross validation of logistic regression model
+# Note: Function assumes response to be a binary factor, 
+#       predictors required in the form to be  in the 
+#       form of "x1+x2", and if using a single predictor
+#       it must be a factor with more than two levels
+cv.logreg = function(formula, data) {
+  ## extract response variable
+  response = Reduce(paste, deparse(formula))
+  response = strsplit(response, "~")[[1]][1]
+  response = gsub(" ", "", response)
+  ## create a matrix by expanding factors into a set of variables
+  newdata = model.matrix(formula, data=data)[,-1] 
+  newdata = cbind(newdata, data[,response])
+  colnames(newdata)[length(colnames(newdata))] = c(response)
+  newdata = as.data.frame(newdata)
+  newdata[,response] = as.factor(newdata[,response]-1) ## -1 to get 0/1 response
+  ## split into folds
+  n = length(data[,response])
+  newdata = newdata[sample(n),] ## randomly shuffle rows
+  folds = cut(seq(1:n), breaks=10, labels=FALSE) ## cut folds for cross val
+  result = NULL
+  formula = as.formula(paste(response,"~.", sep=""))
+  
+  for(i in 1:10){
+    test = which(folds==i, arr.ind=TRUE) ## select indices for test data
+    ## logistic regression
+    model = glm(formula, family=binomial(link="logit"), data=newdata[-test,]) 
+    ## predict using type="response" to return predicted probabilities
+    prediction = predict(model, 
+                         newdata[test, -which(names(newdata)%in%c(response))], 
+                         type="response") 
+    temp = cbind(prediction, newdata[test, response]) 
+    result = rbind(result, temp)
+  }
+  result[,2] = result[,2]-1 ## make the actuals 0/1
+  return(result)
+}
+
+# Evaluates model performance in terms of accuracy, precision, 
+# recall, Fscore, and AUC. Input must be a data matrix where
+# col 1 are predicted probabilities and col 2 are 0/1 observations.
+evaluation = function(result, cutoff=0.5, conf.mat=FALSE) {
+  yprobs = result[,1] ## extract predicted probabilities
+  y = result[,2] ## extract ground truth results
+  ## classified binary values
+  ypreds = factor(floor(yprobs + (1-cutoff)), levels=c("0", "1"))
+  confusion.matrix = table(y, ypreds) ## confusion matrix
+  if(conf.mat) { print(confusion.matrix) }
+  TP = confusion.matrix[2,2] ## if "1" is positive
+  TN = confusion.matrix[1,1] ## if "0" is negative
+  FP = confusion.matrix[1,2]
+  FN = confusion.matrix[2,1]
+  accuracy = (TP+TN)/length(y)
+  precision = TP/(FP+TP)
+  recall = TP/(FN+TP)
+  Fscore = 2/(1/precision + 1/recall)
+  ## calculate auc value
+  suppressWarnings(require("pROC"))
+  auc = auc(y,yprobs)
+  eval = c(accuracy, precision, recall, Fscore, auc) ## combine all measures
+  names(eval) = c("Acc", "Prec", "Rec", "FScr", "AUC")
+  return(eval)
+}
+
+# Plots ROC and lift. Input must be a data matrix where
+# col 1 are predicted probabilities and col 2 are 0/1 labels.
+roc.and.lift = function(result) {
+  result = as.data.frame(result)
+  colnames(result) = c("yprobs", "y")
+  n.test = dim(result)[1]
+  
+  par(mfrow=c(1,2)) ## set parameter to combine plots
+  ## to plot lift curve
+  rank.cb = as.data.frame(result[order(result$yprobs, decreasing = TRUE),]) ## rank probs
+  colnames(rank.cb) = c('predicted','actual')
+  base.rate = mean(result$y) ## baseline increase rate
+  cat("baserate",base.rate,"\n")
+  ax = dim(n.test) # x-axis
+  ay.base = dim(n.test) # y-axis for baseline
+  ay.pred = dim(n.test) # y-axis for predictions
+  ax[1] = 1;
+  ay.base[1] = base.rate
+  ay.pred[1] = rank.cb$actual[1]
+  for(i in 2:n.test) {
+    ax[i] = i;
+    ay.base[i] = base.rate * i
+    ay.pred[i] = ay.pred[i-1] + rank.cb$actual[i] # cumulative positive cases
+  }
+  plot(ax, ay.pred, xlab="Num. cases", ylab="Num. successes", main="Lift curve", type="l")
+  points(ax, ay.base, type="l", col="red")
+  
+  ## to plot roc
+  require("ROCR", quietly=TRUE)
+  newdata = data.frame(predictions=result$yprobs, labels=result$y)
+  result = prediction(newdata$predictions, newdata$labels)
+  perf = performance(result,'sens','fpr')
+  plot(perf, main="ROC curve")
+  x = seq(0, 1, by=0.05)
+  y = x
+  points(x, y, type="l", col="red")
+  par(mfrow=c(1,1)) ## reset parameter to default
+}
+
+```
+\newpage
+```{r, fig.width=7.5}
+
+# Evaluation of five models
+f.A = TARGET_Adjusted~Age+Gender+Marital+Education+Occupation+Employment+Hours+Income+ClaimedDeduction+Deductions
+f.B = TARGET_Adjusted~Age+Gender+Marital+Education+Occupation+Income+ClaimedDeduction
+f.C = TARGET_Adjusted~Age+Gender+Marital+Education+Occupation+ClaimedDeduction
+f.D = TARGET_Adjusted~Age+Gender+Marital+Education+ClaimedDeduction
+f.E = TARGET_Adjusted~Age+Gender+Marital+Education
+
+set.seed(1337)
+cv.A = cv.logreg(f.A, df)
+cv.B = cv.logreg(f.B, df)
+cv.C = cv.logreg(f.C, df)
+cv.D = cv.logreg(f.D, df)
+cv.E = cv.logreg(f.E, df)
+
+eval.A = evaluation(cv.A)
+eval.B = evaluation(cv.B)
+eval.C = evaluation(cv.C)
+eval.D = evaluation(cv.D)
+eval.E = evaluation(cv.E)
+
+evals = data.frame(eval.A, eval.B, eval.C, eval.D, eval.E)
+colnames(evals) = c("Model A", "Model B", "Model C", "Model D", "Model E")
+rownames(evals) = c("Accuracy", "Precision", "Recall", "F-score", "AUC")
+kable(evals, caption = "Table 8: Evaluation of five models")
+
+```
+\newpage
+```{r}
+
+# Model C selected as best model; plot roc and lift
+roc.and.lift(cv.C) 
+
+rm(list=c("f.A", "f.B", "f.C", "f.D", "f.E", 
+          "cv.A", "cv.B", "cv.C", "cv.D", "cv.E", 
+          "eval.A", "eval.B", "eval.C", "eval.D", "eval.E", "evals"))
+
+```
+\newpage
+```{r}
+
+# Generate logistic regression model
+log.model = glm(TARGET_Adjusted~Age+Gender+Marital+Education+Occupation+ClaimedDeduction, 
+                family=binomial("logit"), data=df)
+summary(log.model)
+
+odds.tbl = as.data.frame(cbind(log.model$coefficients, exp(log.model$coefficients)))
+colnames(odds.tbl) <- c("Log odds", "Odds ratio")
+kable(odds.tbl, caption = "Table 9: Log odds and odds ratio for each predictor variable")
+rm(odds.tbl)
+
+```
+\newpage
+# Linear Regression Analysis of RISK_Adjustment
+
+The linear regression analysis of RISK_Adjustment aims to predict the adjustment amount for cases that are adjusted. Only records that resulted in an adjustment are used in this analysis. The linear regression model of RISK_Adjustment against all predictor variables results in a poor model that describes only 7.87% of the variation in the data (adjusted r-squared of 0.0194), and cross validation results in a root mean squared error of \$16065.87. Inspecting the residual plots demonstrates several violations of the assumptions of linear regression. The scatterplot of residuals against fitted values demonstrates a negative linear trend that is asymmetrically distributed, indicating that the model does not meet the assumption of linearity. The normal probability plot of the standardized residuals indicates the non-normality of their distribution, and clearly shows a violation of the assumption of normality. The scatterplot of scale against location presents a cluster of points following a curved line, indicating the violation of the assumption of homoscedasticity. These violations indicate a need to apply some sort of transformation to the data. 
+
+The response variable, RISK_Adjustment, is shifted (+2000) and a log 10 transformation is applied, but the resulting model still does not satisfy the assumption of normality of the distribution of residuals, and the model only describes 5.13% of the variation in the data (RMSE = 0.3791). Table 10 describes the increase in root mean squared error for the exclusion of each predictor variable in the model, and indicates that the most important variables in predicting RISK_Adjustment are Occupation followed by Income, and excluding Age, Gender, Deductions, or ClaimedDeduction actually reduces errors (however, while also decreasing the r-squared value). A polynomial regression model was also generated using degree = 3 (selected using cross validation of in-sample vs out-of-sample predictions over varying degrees), but this model only describes 2.93% of the variation in the data (RMSE = 0.3833) and does not significantly improve performance. 
+
+Predicting the adjustment amount has demonstrated itself to be a more difficult problem. The linear regression model of RISK_Adjustment against all predictors for cases in which the target was adjusted resulted in a model which describes only 7.87% of the variation in the data (adjusted r-squared of 0.0194), and cross validation results in a root mean squared error of \$16065.87. However, further inspection indicates that this model does not satisfy the assumptions of linear regression. A log-shift transformation was applied to the data, but this did not improve the performance of the model (R-squared = 0.0513, RMSE = 0.3791). Occupation and Income result in the largest increase in RMSE when excluded from the model, and are considered to be the most important variables in predicting RISK_Adjustment. Polynomial regression additionally did not improve performance (R-squared = 0.0293, RMSE = 0.3833).
+
+```{r}
+
+## function for 10-fold cross validation of regression performance based on RMSE
+cv.linreg = function(formula, data) {
+  ## extract response variable
+  response = Reduce(paste, deparse(formula))
+  response = strsplit(response, "~")[[1]][1]
+  response = gsub(" ", "", response)
+  ## create a matrix by expanding factors into a set of variables
+  newdata = model.matrix(formula, data=data)[,-1] 
+  newdata = cbind(newdata, data[,response])
+  colnames(newdata)[length(colnames(newdata))] = c(response)
+  newdata = as.data.frame(newdata)
+  ## split into folds
+  n = length(data[,response])
+  newdata = newdata[sample(n),] ## randomly shuffle rows
+  folds = cut(seq(1:n), breaks=10, labels=FALSE) ## cut folds for cross val
+  result = NULL
+  formula = as.formula(paste(response,"~.", sep=""))
+  
+  for(i in 1:10) {
+    test = which(folds==i, arr.ind=TRUE) # select indices for test data
+    test.data = newdata[test,]
+    train.data = newdata[-test,]
+    model = lm(formula, data=newdata[-test,])
+    predicted = predict(model, newdata=newdata[test,])
+    observation = newdata[test, response]
+    temp = predicted - observation
+    result = c(result, temp)
+  }
+  rmse = sqrt(mean(result^2))
+  return(rmse)
+}
+
+# Function for comparing in-sample and out-of-sample error of 
+# polynomial regression over various degrees
+cross.val.poly.reg = 
+  function(data, response, poly.var, lin.var, deg=12, train.set=0.5) {
+    ## measure performance in terms of RMSE
+    rmse = function(y, p) { return(sqrt(mean((y - p)^2))) }
+    performance = data.frame()
+    ## split data into a training set and test set for cross-validation
+    n = length(data[,response])
+    train = sort(sample(1:n, round(train.set*n)))
+    formula = as.formula(paste(response,"~poly(",poly.var,", degree=d)+",lin.var,sep=""))
+    
+    for (d in 1:deg) {
+      poly.fit = lm(formula, data=data[train,])
+      performance = rbind(performance, 
+                          data.frame(Degree=d, Error="Training", 
+                                     RMSE = rmse(data[train,response],
+                                                 predict(poly.fit))
+                                     )
+                          )
+      performance = rbind(performance, 
+                          data.frame(Degree=d, Error="Cross-Validation",
+                                     RMSE = rmse(data[-train,response], 
+                                                 predict(poly.fit, newdata=data[-train,]))
+                                     )
+                          )
+      }
+  
+    ## Plot the performance of polynomial regression models for each degree
+    require("ggplot2")
+    require("scales")
+    ggplot(performance , aes(x=Degree, y=RMSE, linetype=Error)) + 
+      geom_point() + geom_line() + scale_y_continuous(labels=comma)
+}
+
+```
+\newpage
+```{r, fig.height=4.75}
+
+# Perform regression on only records that resulted in adjustments
+adj.df = df[df$TARGET_Adjusted=="1",]
+
+# Remove the TARGET_Adjusted column
+adj.df = adj.df[,-which(names(df)%in%c("TARGET_Adjusted"))]
+
+par(mfrow=c(2,2))
+set.seed(1337)
+# Explore linear regression of RISK_Adjustment against all predictors
+model = lm(RISK_Adjustment~., adj.df)
+summary(model)
+cv.linreg(RISK_Adjustment~., adj.df)
+plot(model)
+
+```
+\newpage
+```{r, fig.height=4.75}
+
+# Apply log-shift transformation to response variable
+adj.df$RISK_Adjustment = log10(adj.df$RISK_Adjustment + 2000)
+
+par(mfrow=c(2,2))
+set.seed(1337)
+# Explore linear regression of RISK_Adjustment against all predictors after transformations
+model = lm(RISK_Adjustment~., adj.df)
+summary(model)
+rmse = cv.linreg(RISK_Adjustment~., adj.df)
+rmse
+plot(model)
+
+```
+\newpage
+```{r}
+
+# Explore variable importance
+result = NULL
+## Age
+predictor = cv.linreg(RISK_Adjustment~Employment+Education+Marital+Occupation+
+                        Income+Gender+Deductions+Hours+ClaimedDeduction, adj.df) 
+predictor = rmse - predictor
+result = rbind(result, Age=predictor)
+
+## Employment
+predictor = cv.linreg(RISK_Adjustment~Age+Education+Marital+Occupation+
+                        Income+Gender+Deductions+Hours+ClaimedDeduction, adj.df) 
+predictor = rmse - predictor
+result = rbind(result, Employment=predictor)
+
+## Marital
+predictor = cv.linreg(RISK_Adjustment~Age+Employment+Education+Occupation+
+                        Income+Gender+Deductions+Hours+ClaimedDeduction, adj.df) 
+predictor = rmse - predictor
+result = rbind(result, Marital=predictor)
+
+## Occupation
+predictor = cv.linreg(RISK_Adjustment~Age+Employment+Education+Marital+
+                        Income+Gender+Deductions+Hours+ClaimedDeduction, adj.df) 
+predictor = rmse - predictor
+result = rbind(result, Occupation=predictor)
+
+## Income
+predictor = cv.linreg(RISK_Adjustment~Age+Employment+Education+Marital+Occupation+
+                        Gender+Deductions+Hours+ClaimedDeduction, adj.df) 
+predictor = rmse - predictor
+result = rbind(result, Income=predictor)
+
+## Gender
+predictor = cv.linreg(RISK_Adjustment~Age+Employment+Education+Marital+Occupation+
+                        Income+Deductions+Hours+ClaimedDeduction, adj.df) 
+predictor = rmse - predictor
+result = rbind(result, Gender=predictor)
+
+## Deductions
+predictor = cv.linreg(RISK_Adjustment~Age+Employment+Education+Marital+Occupation+
+                        Income+Gender+Hours+ClaimedDeduction, adj.df) 
+predictor = rmse - predictor
+result = rbind(result, Deductions=predictor)
+
+## Hours
+predictor = cv.linreg(RISK_Adjustment~Age+Employment+Education+Marital+Occupation+
+                        Income+Gender+Deductions+ClaimedDeduction, adj.df) 
+predictor = rmse - predictor
+result = rbind(result, Hours=predictor)
+
+## ClaimedDeduction
+predictor = cv.linreg(RISK_Adjustment~Age+Employment+Education+Marital+Occupation+
+                        Income+Gender+Deductions+Hours, adj.df) 
+predictor = rmse - predictor
+result = rbind(result, ClaimedDeduction=predictor)
+
+result = as.data.frame(result)
+colnames(result)[1] = c("RMSE Increase")
+kable(result, caption = "Table 10: Increase in RMSE given exclusion of predictor")
+rm(list=c("rmse", "predictor", "result"))
+
+```
+\newpage
+```{r}
+
+set.seed(1337)
+# Cross validation of in-sample and out-of-sample performance over varying degrees of income
+cross.val.poly.reg(adj.df, "RISK_Adjustment", "Income", 
+                   "Education+Marital+Hours+ClaimedDeduction", deg=6)
+
+model = lm(RISK_Adjustment~poly(Income, degree=3)+Education+Marital+Hours+ClaimedDeduction, 
+           adj.df)
+summary(model)
+rmse = cv.linreg(RISK_Adjustment~., adj.df)
+rmse
+
+```
+\newpage
+# Results
+
+The exploratory analysis indicates that there are significant differences in Age, Income, Deductions, and Hours between cases that were adjusted and not adjusted. However, there were no correlations between any of the quantitative predictors and the adjustment amount. Exploration of the qualitative predictor variables indicated that cases where the individual is male, married with a spouse present, has a post-graduate education, has a particular occupation (executive, professional, protective), or claimed a deduction were more likely to have been adjusted. However, there were no significant differences in the adjustment amounts between the categories of any of the qualitative predictors. 
+
+Cross validation of the logistic regression model of TARGET_Adjusted against all predictors demonstrates an F-score of 0.603 and an AUC of 0.885. The logistic regression model including only Age, Gender, Marital, Education, Occupation, and ClaimedDeduction as predictors demonstrates comparable performance with an F-score of 0.602 and an AUC of 0.872. Observation of the odds ratio of each variable demonstrates that having a post-graduate education or being married with a spouse present results in the largest change of the odds of success. 
